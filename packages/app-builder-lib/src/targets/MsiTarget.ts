@@ -9,6 +9,7 @@ import { MsiOptions } from "../"
 import { getBinFromUrl } from "../binDownload"
 import { Target } from "../core"
 import { DesktopShortcutCreationPolicy, FinalCommonWindowsInstallerOptions, getEffectiveOptions } from "../options/CommonWindowsInstallerConfiguration"
+import { Protocol } from "../options/PlatformSpecificBuildOptions"
 import { normalizeExt } from "../platformPackager"
 import { getTemplatePath } from "../util/pathManager"
 import { VmManager } from "../vm/vm"
@@ -17,6 +18,7 @@ import { WinPackager } from "../winPackager"
 import { createStageDir, getWindowsInstallationDirName } from "./targetUtil"
 
 const ELECTRON_BUILDER_UPGRADE_CODE_NS_UUID = UUID.parse("d752fe43-5d44-44d5-9fc9-6dd1bf19d5cc")
+const ELECTRON_BUILDER_PROTOCOL_COMPONENT_NS_UUID = UUID.parse("a18b2e4c-3d5f-4a6e-9c1b-7f8d0e2a3b4c")
 const ROOT_DIR_ID = "APPLICATIONFOLDER"
 
 // WiX doesn't support Mono, so, dontnet462 is required to be installed for wine (preinstalled in our bundled wine)
@@ -169,6 +171,10 @@ export default class MsiTarget extends Target {
     const { files, dirs } = await this.computeFileDeclaration(appOutDir)
     const options = this.options
 
+    // Get protocols from both global config and platform-specific options
+    const protocols = asArray(this.packager.config.protocols).concat(asArray(this.packager.platformSpecificBuildOptions.protocols))
+    const protocolComponents = this.computeProtocolComponents(protocols, commonOptions.isPerMachine)
+
     return (await this.projectTemplate.value)({
       ...(await this.getBaseOptions(commonOptions)),
       isCreateDesktopShortcut: commonOptions.isCreateDesktopShortcut !== DesktopShortcutCreationPolicy.NEVER,
@@ -179,7 +185,61 @@ export default class MsiTarget extends Target {
       installationDirectoryWixName: getWindowsInstallationDirName(appInfo, commonOptions.isAssisted || commonOptions.isPerMachine === true),
       dirs,
       files,
+      protocolComponents,
+      hasProtocols: protocols.length > 0,
     })
+  }
+
+  /**
+   * Generate WiX components for URL protocol handlers.
+   * For per-machine installs, writes to HKCR (HKEY_CLASSES_ROOT).
+   * For per-user installs, writes to HKCU\Software\Classes.
+   */
+  private computeProtocolComponents(protocols: Array<Protocol>, isPerMachine: boolean): string {
+    if (protocols.length === 0) {
+      return ""
+    }
+
+    const appInfo = this.packager.appInfo
+    const productName = appInfo.productName
+    const components: Array<string> = []
+    const space = " ".repeat(6)
+
+    // Registry root: HKCR for per-machine, HKCU for per-user
+    // For per-user, we write to HKCU\Software\Classes which is merged with HKCR
+    const registryRoot = isPerMachine ? "HKCR" : "HKCU"
+    const keyPrefix = isPerMachine ? "" : "Software\\Classes\\"
+
+    for (const protocol of protocols) {
+      for (const scheme of asArray(protocol.schemes)) {
+        // Generate a deterministic GUID for this protocol component
+        const componentGuid = UUID.v5(`protocol:${scheme}`, ELECTRON_BUILDER_PROTOCOL_COMPONENT_NS_UUID).toUpperCase()
+        const componentId = `Protocol_${scheme.replace(/[^a-zA-Z0-9]/g, "_")}`
+
+        let component = `<Component Id="${componentId}" Guid="${componentGuid}" Directory="APPLICATIONFOLDER">\n`
+
+        // Main protocol key with URL Protocol marker
+        component += `${space}  <RegistryKey Root="${registryRoot}" Key="${keyPrefix}${scheme}">\n`
+        component += `${space}    <RegistryValue Type="string" Value="URL:${xmlAttr(protocol.name)}"/>\n`
+        component += `${space}    <RegistryValue Name="URL Protocol" Type="string" Value=""/>\n`
+        component += `${space}  </RegistryKey>\n`
+
+        // DefaultIcon subkey
+        component += `${space}  <RegistryKey Root="${registryRoot}" Key="${keyPrefix}${scheme}\\DefaultIcon">\n`
+        component += `${space}    <RegistryValue Type="string" Value="[APPLICATIONFOLDER]${xmlAttr(productName)}.exe,0"/>\n`
+        component += `${space}  </RegistryKey>\n`
+
+        // shell\open\command subkey
+        component += `${space}  <RegistryKey Root="${registryRoot}" Key="${keyPrefix}${scheme}\\shell\\open\\command">\n`
+        component += `${space}    <RegistryValue Type="string" Value="&quot;[APPLICATIONFOLDER]${xmlAttr(productName)}.exe&quot; &quot;%1&quot;"/>\n`
+        component += `${space}  </RegistryKey>\n`
+
+        component += `${space}</Component>`
+        components.push(component)
+      }
+    }
+
+    return components.join("\n      ")
   }
 
   protected async getBaseOptions(commonOptions: FinalCommonWindowsInstallerOptions): Promise<any> {

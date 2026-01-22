@@ -105,6 +105,9 @@
     <!-- Files -->
     <Feature Id="ProductFeature" Absent="disallow">
       <ComponentGroupRef Id="ProductComponents"/>
+      {{ if (hasProtocols) { }}
+      <ComponentGroupRef Id="ProtocolComponents"/>
+      {{ } -}}
     </Feature>
 
     {{-dirs}}
@@ -112,5 +115,12 @@
     <ComponentGroup Id="ProductComponents" Directory="APPLICATIONFOLDER">
       {{-files}}
     </ComponentGroup>
+
+    {{ if (hasProtocols) { }}
+    <!-- URL Protocol Handlers -->
+    <ComponentGroup Id="ProtocolComponents">
+      {{-protocolComponents}}
+    </ComponentGroup>
+    {{ } -}}
   </Product>
 </Wix>
